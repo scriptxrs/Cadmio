@@ -4,6 +4,7 @@
   "description": "Discord bot with Luau executor",
   "main": "server.js",
   "scripts": {
+    "postinstall": "curl -fsSL https://github.com/lune-org/lune/releases/latest/download/lune-linux-x86_64 -o lune && chmod +x lune",
     "start": "node server.js"
   },
   "dependencies": {

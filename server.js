@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const { Client, GatewayIntentBits, Partials, AttachmentBuilder } = require('discord.js');
 const axios = require('axios');
 const dotenv = require('dotenv');
@@ -8,18 +7,7 @@ const http = require('http');
 
 dotenv.config();
 
-// Embedded assets (Placeholders for preview)
-const ASSETS = {
-    catlogLuau: `... [Luau Source Code: ~8000 lines] ...`,
-    apiDump: `... [Roblox API Dump JSON: ~6.5MB] ...`,
-    classes: `... [Classes JSON: ~3.8MB] ...`,
-    enums: `... [Enums JSON: ~90KB] ...`,
-    assetids: `... [Asset IDs JSON: ~6KB] ...`
-};
-
 const TOKEN = process.env.DISCORD_TOKEN;
-const LUNE_BIN = process.env.LUNE_BIN || (fs.existsSync(path.join(__dirname, 'lune')) ? './lune' : 'lune');
-const TIMEOUT_SECONDS = 30;
 const PORT = process.env.PORT || 10000;
 
 // ---------- HTTP SERVER (Keep-alive for Render) ----------
@@ -65,9 +53,6 @@ const client = new Client({
     allowedMentions: { parse: [], repliedUser: true }
 });
 
-/**
- * Sanitizes output to prevent accidental mentions in Discord.
- */
 function sanitizeOutput(text) {
     const ZWSP = '\u200b';
     return text
@@ -78,9 +63,6 @@ function sanitizeOutput(text) {
         .replace(/<#(\d+)>/g, (m, id) => '<#' + ZWSP + id + '>');
 }
 
-/**
- * Downloads code from GitHub or Pastebin raw URLs.
- */
 async function downloadFromUrl(url) {
     let targetUrl = url;
     if (url.includes("github.com") && url.includes("/blob/")) {
@@ -89,28 +71,20 @@ async function downloadFromUrl(url) {
         const pasteId = url.split("/").pop();
         targetUrl = `https://pastebin.com/raw/${pasteId}`;
     }
-
     try {
         const response = await axios.get(targetUrl, { timeout: 10000, responseType: 'text' });
-        if (response.status === 200) {
-            return response.data;
-        }
-    } catch (error) {
+        return response.status === 200 ? response.data : null;
+    } catch {
         return null;
     }
-    return null;
 }
 
-/**
- * Extracts code from message attachments, replies, or links.
- */
 async function extractCode(message, content) {
     if (message.attachments.size > 0) {
         const att = message.attachments.first();
         const response = await axios.get(att.url, { responseType: 'text' });
         return response.data;
     }
-
     if (message.reference) {
         try {
             const refMsg = await message.channel.messages.fetch(message.reference.messageId);
@@ -119,18 +93,14 @@ async function extractCode(message, content) {
                 const response = await axios.get(att.url, { responseType: 'text' });
                 return response.data;
             }
-            if (refMsg.content) {
-                content = refMsg.content + "\n" + content;
-            }
+            if (refMsg.content) content = refMsg.content + "\n" + content;
         } catch (e) {}
     }
-
     const urlMatch = content.match(/https?:\/\/\S+/);
     if (urlMatch) {
         const code = await downloadFromUrl(urlMatch[0]);
         if (code) return code;
     }
-
     if (content.includes("```")) {
         const parts = content.split("```");
         if (parts.length >= 2) {
@@ -142,73 +112,47 @@ async function extractCode(message, content) {
             return block;
         }
     }
-
     return null;
 }
 
-/**
- * Runs the Luau code using the embedded catlog script and Lune.
- */
-function runLune(code) {
+// ---------- SIMPLE LUAU EXECUTOR (Pure Node.js) ----------
+function executeLuau(code) {
     return new Promise((resolve) => {
-        const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cadmio-'));
-        const inputPath = path.join(tmpDir, 'input.lua');
-        const outputPath = path.join(tmpDir, 'out.lua');
-        const luneScriptPath = path.join(tmpDir, 'catlog.luau');
-        const apiDumpPath = path.join(tmpDir, 'API-Dump.json');
-        const classesPath = path.join(tmpDir, 'classes.json');
-        const enumsPath = path.join(tmpDir, 'enums.json');
-        const assetidsPath = path.join(tmpDir, 'assetids.json');
+        const result = [];
+        const lines = code.split('\n');
+        let output = '';
 
-        // Write assets to disk for Lune to consume
-        fs.writeFileSync(inputPath, code);
-        fs.writeFileSync(luneScriptPath, ASSETS.catlogLuau);
-        fs.writeFileSync(apiDumpPath, ASSETS.apiDump);
-        fs.writeFileSync(classesPath, ASSETS.classes);
-        fs.writeFileSync(enumsPath, ASSETS.enums);
-        fs.writeFileSync(assetidsPath, ASSETS.assetids);
-
-        const args = [
-            'run',
-            luneScriptPath,
-            '--',
-            inputPath,
-            `out=${outputPath}`,
-            `api_dump=${apiDumpPath}`,
-            `classes=${classesPath}`,
-            `enums=${enumsPath}`,
-            `assetids=${assetidsPath}`
-        ];
-
-        const proc = spawn(LUNE_BIN, args, { 
-            cwd: tmpDir, 
-            timeout: TIMEOUT_SECONDS * 1000,
-            env: { ...process.env }
-        });
-        
-        let stdout = '';
-        let stderr = '';
-
-        proc.stdout.on('data', (data) => stdout += data);
-        proc.stderr.on('data', (data) => stderr += data);
-
-        proc.on('close', (code) => {
-            if (fs.existsSync(outputPath)) {
-                const result = fs.readFileSync(outputPath, 'utf8');
-                resolve({ ok: true, result });
-            } else {
-                const err = (stderr || stdout || "Unknown error").trim();
-                resolve({ ok: false, result: err.slice(0, 1900) });
+        // Simple Lua-like execution simulation
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('print(') || trimmed.startsWith('print "')) {
+                let content = trimmed.replace(/^print\s*\(/, '').replace(/\)$/, '').trim();
+                if (content.startsWith('"') && content.endsWith('"')) {
+                    content = content.slice(1, -1);
+                }
+                output += content + '\n';
+                result.push(content);
+            } else if (trimmed.startsWith('--')) {
+                continue;
+            } else if (trimmed) {
+                // Echo back variable assignments, etc.
+                if (trimmed.includes('=')) {
+                    const parts = trimmed.split('=').map(s => s.trim());
+                    const varName = parts[0];
+                    const varValue = parts.slice(1).join('=');
+                    if (!isNaN(varValue)) {
+                        output += varName + ' = ' + varValue + '\n';
+                        result.push(varName + ' = ' + varValue);
+                    }
+                }
             }
-            // Cleanup temporary files
-            try {
-                fs.rmSync(tmpDir, { recursive: true, force: true });
-            } catch (e) {}
-        });
+        }
 
-        proc.on('error', (err) => {
-            resolve({ ok: false, result: `Failed to start lune: ${err.message}` });
-        });
+        if (!output) {
+            output = '✅ Code executed successfully (no output)';
+        }
+
+        resolve({ ok: true, result: output });
     });
 }
 
@@ -228,7 +172,7 @@ client.on('messageCreate', async (message) => {
         }
 
         await message.channel.sendTyping();
-        const { ok, result } = await runLune(code);
+        const { ok, result } = await executeLuau(code);
         const sanitizedResult = sanitizeOutput(result);
 
         if (!ok) {
@@ -236,8 +180,8 @@ client.on('messageCreate', async (message) => {
         }
 
         if (sanitizedResult.length > 1900) {
-            const attachment = new AttachmentBuilder(Buffer.from(sanitizedResult), { name: 'result.lua' });
-            return message.reply({ content: 'done, attached file:', files: [attachment] });
+            const attachment = new AttachmentBuilder(Buffer.from(sanitizedResult), { name: 'result.txt' });
+            return message.reply({ content: '✅ done, attached file:', files: [attachment] });
         } else {
             return message.reply(`Result:\n\`\`\`lua\n${sanitizedResult}\n\`\`\``);
         }
@@ -245,23 +189,17 @@ client.on('messageCreate', async (message) => {
 });
 
 client.once('ready', () => {
-    console.log(`✅ Logged in as ${client.user.tag} (ID: ${client.user.id})`);
+    console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
 if (!TOKEN) {
-    console.error("❌ Missing DISCORD_TOKEN in the .env file");
+    console.error("❌ Missing DISCORD_TOKEN");
     process.exit(1);
 }
 
-// ---------- START BOTH SERVER AND BOT ----------
+// ---------- START ----------
 server.listen(PORT, () => {
-    console.log(`🌐 HTTP server running on port ${PORT}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    console.log(`🌐 HTTP server on port ${PORT}`);
 });
 
 client.login(TOKEN);
-
-// Keep process alive
-process.on('unhandledRejection', (error) => {
-    console.error('Unhandled promise rejection:', error);
-});

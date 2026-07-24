@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const { Client, GatewayIntentBits, Partials, AttachmentBuilder } = require('discord.js');
 const axios = require('axios');
 const dotenv = require('dotenv');
+const http = require('http');
 
 dotenv.config();
 
@@ -17,9 +18,43 @@ const ASSETS = {
 };
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const LUNE_BIN = process.env.LUNE_BIN || 'lune';
+const LUNE_BIN = process.env.LUNE_BIN || (fs.existsSync(path.join(__dirname, 'lune')) ? './lune' : 'lune');
 const TIMEOUT_SECONDS = 30;
+const PORT = process.env.PORT || 10000;
 
+// ---------- HTTP SERVER (Keep-alive for Render) ----------
+const server = http.createServer((req, res) => {
+  if (req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Cadmio Bot</title></head>
+        <body style="font-family: monospace; background: #0a0a0a; color: #00ff88; padding: 40px;">
+          <h1>🐱 Cadmio Discord Bot</h1>
+          <p>Status: <strong style="color: #00ff88;">✅ ONLINE</strong></p>
+          <p>Uptime: ${Math.floor(process.uptime())} seconds</p>
+          <p>Bot: ${client ? client.user?.tag || 'Not logged in' : 'Initializing...'}</p>
+          <hr>
+          <p style="color: #666; font-size: 12px;">Keeping Render free tier alive</p>
+        </body>
+      </html>
+    `);
+  } else if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'online',
+      uptime: process.uptime(),
+      bot: client?.user?.tag || null,
+      timestamp: new Date().toISOString()
+    }));
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+});
+
+// ---------- DISCORD BOT ----------
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -145,7 +180,11 @@ function runLune(code) {
             `assetids=${assetidsPath}`
         ];
 
-        const proc = spawn(LUNE_BIN, args, { cwd: tmpDir, timeout: TIMEOUT_SECONDS * 1000 });
+        const proc = spawn(LUNE_BIN, args, { 
+            cwd: tmpDir, 
+            timeout: TIMEOUT_SECONDS * 1000,
+            env: { ...process.env }
+        });
         
         let stdout = '';
         let stderr = '';
@@ -206,12 +245,23 @@ client.on('messageCreate', async (message) => {
 });
 
 client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag} (ID: ${client.user.id})`);
+    console.log(`✅ Logged in as ${client.user.tag} (ID: ${client.user.id})`);
 });
 
 if (!TOKEN) {
-    console.error("Missing DISCORD_TOKEN in the .env file");
+    console.error("❌ Missing DISCORD_TOKEN in the .env file");
     process.exit(1);
 }
 
+// ---------- START BOTH SERVER AND BOT ----------
+server.listen(PORT, () => {
+    console.log(`🌐 HTTP server running on port ${PORT}`);
+    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+});
+
 client.login(TOKEN);
+
+// Keep process alive
+process.on('unhandledRejection', (error) => {
+    console.error('Unhandled promise rejection:', error);
+});
